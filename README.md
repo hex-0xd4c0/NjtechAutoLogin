@@ -1,6 +1,6 @@
 # njtechlogin - 南京工业大学校园网自动登录工具
 
-[![Go Version](https://img.shields.io/github/go-mod/go-version/yourusername/njtechlogin)](https://golang.org/)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/hex-0xd4c0/njtechlogin)](https://golang.org/)
 
 `njtechlogin` 是一个专为 OpenWRT 路由器设计的校园网自动登录与保活工具，支持南京工业大学（Njtech）的 Dr.COM 认证系统。它可以作为系统服务后台运行，也可以在前台以绿色模式运行，自动检测网络状态并在掉线时重连。
 
@@ -177,4 +177,4 @@ njtechlogin --uninstall
 
 ---
 
-**注意**：本工具仅供学习交流使用，请勿用于非法用途。使用前请确保你拥有校园网的合法使用权。
+**注意**：本工具仅供学习交流使用，请勿用于非法用途。使用前请确保你拥有校园网的合法使用权。使用本软件造成的一切后果由使用者承担。

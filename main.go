@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/exec"
@@ -34,7 +36,7 @@ const (
 	initScriptPath = "/etc/init.d/" + programName
 	logDir         = "/var/log/" + programName
 	pidFile        = "/var/run/" + programName + ".pid"
-	version        = "1.0.0"
+	version        = "1.1.0" // 版本升级
 )
 
 // 配置结构
@@ -48,7 +50,7 @@ type Config struct {
 
 // 日志管理器（支持文件和标准输出）
 type Logger struct {
-	out       io.Writer    // 实际输出目标
+	out       io.Writer     // 实际输出目标
 	file      *os.File      // 仅当使用文件时有效
 	date      string        // 当前日志日期
 	logger    *log.Logger   // 底层log.Logger
@@ -82,7 +84,7 @@ func NewStdoutLogger() *Logger {
 
 // 轮转日志（仅文件模式有效）
 func (l *Logger) rotate() error {
-	if l.out != os.Stdout { // 如果已经设置为 stdout，不执行轮转
+	if l.out == os.Stdout { // 标准输出不轮转
 		return nil
 	}
 	now := time.Now()
@@ -206,7 +208,7 @@ func main() {
 
 func printHelp() {
 	fmt.Printf(`%s 版本 %s
-校园网自动登录与保活工具，适用于OpenWRT路由器。
+校园网自动登录与保活工具（OpenWRT 版）
 
 用法:
   %s [命令] [选项]
@@ -325,55 +327,123 @@ func getOutboundIP() (net.IP, string, error) {
 	return nil, "", fmt.Errorf("接口 %s 没有有效的IPv4地址", iface)
 }
 
-// 模拟Edge浏览器HTTP客户端
+// 模拟浏览器HTTP客户端（启用CookieJar）
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		// 允许重定向，但记录
-		return nil
+		return nil // 允许重定向
 	},
 }
 
+func init() {
+	jar, err := cookiejar.New(nil)
+	if err == nil {
+		httpClient.Jar = jar
+	}
+}
+
+// 创建带有完整浏览器头的请求
 func newRequest(method, url string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return nil, err
 	}
+	// 完整模拟 Edge on Linux (OpenWRT 通常为 Linux)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Cache-Control", "max-age=0")
+	// Referer 将在具体请求中设置
 	return req, nil
+}
+
+// 读取响应体并自动解压（如果内容为gzip）
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// 检查是否gzip压缩（通过魔数）
+	if len(body) >= 2 && body[0] == 0x1f && body[1] == 0x8b {
+		globalLogger.Printf("检测到gzip压缩数据，尝试解压")
+		gr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("创建gzip reader失败: %v", err)
+		}
+		defer gr.Close()
+		decompressed, err := io.ReadAll(gr)
+		if err != nil {
+			return nil, fmt.Errorf("gzip解压失败: %v", err)
+		}
+		return decompressed, nil
+	}
+	return body, nil
+}
+
+// 访问门户首页，模拟浏览器初始请求
+func visitHomepage() error {
+	homepageURL := "http://10.50.255.11/"
+	req, err := newRequest("GET", homepageURL, nil)
+	if err != nil {
+		return err
+	}
+	// 首页的Referer通常为空
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("访问首页失败: %v", err)
+	}
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return fmt.Errorf("读取首页响应失败: %v", err)
+	}
+	globalLogger.Printf("首页访问完成，状态码: %d，内容长度: %d", resp.StatusCode, len(body))
+	if len(body) > 200 {
+		globalLogger.Printf("首页内容前200字节: %s", body[:200])
+	}
+	return nil
 }
 
 // 登录校园网
 func login(username, password, provider string) error {
-	ip, _, err := getOutboundIP()
+	// 第一步：模拟访问首页
+	if err := visitHomepage(); err != nil {
+		globalLogger.Printf("访问首页失败（不影响登录尝试）: %v", err)
+		// 即使首页失败，也继续尝试登录
+	}
+
+	ip, iface, err := getOutboundIP()
 	if err != nil {
 		return fmt.Errorf("获取本机IP失败: %v", err)
 	}
 	ipStr := ip.String()
-	globalLogger.Printf("使用IP: %s", ipStr)
+	globalLogger.Printf("使用IP: %s (接口: %s)", ipStr, iface)
 
-	// 第一步：获取配置（可选，但模拟完整流程）
+	// 第二步：获取配置（模拟完整流程）
 	loadConfigURL := fmt.Sprintf("http://10.50.255.11:801/eportal/portal/page/loadConfig?callback=dr1001&program_index=&wlan_vlan_id=1&wlan_user_ip=%s&wlan_user_ipv6=&wlan_user_ssid=&wlan_user_areaid=&wlan_ac_ip=&wlan_ap_mac=000000000000&gw_id=000000000000&jsVersion=4.X&v=%d&lang=zh",
 		base64.StdEncoding.EncodeToString([]byte(ipStr)), time.Now().UnixNano()/1e6)
 	req, err := newRequest("GET", loadConfigURL, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Referer", "http://10.50.255.11/")
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("loadConfig请求失败: %v", err)
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	// 解析JSONP，这里可以忽略结果，但检查是否成功
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return fmt.Errorf("读取loadConfig响应失败: %v", err)
+	}
 	if !bytes.Contains(body, []byte(`"code":1`)) {
 		globalLogger.Printf("loadConfig返回异常: %s", string(body))
 		// 继续尝试登录
 	}
 
-	// 第二步：登录
+	// 第三步：登录
 	userAccount := fmt.Sprintf(",0,%s@%s", username, provider)
 	loginURL := fmt.Sprintf("http://10.50.255.11:801/eportal/portal/login?callback=dr1003&login_method=1&user_account=%s&user_password=%s&wlan_user_ip=%s&wlan_user_ipv6=&wlan_user_mac=000000000000&wlan_ac_ip=&wlan_ac_name=&jsVersion=4.1.3&terminal_type=1&lang=zh-cn&v=%d&lang=zh",
 		url.QueryEscape(userAccount), url.QueryEscape(password), ipStr, time.Now().UnixNano()/1e6)
@@ -381,26 +451,36 @@ func login(username, password, provider string) error {
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Referer", "http://10.50.255.11/")
 	resp, err = httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("登录请求失败: %v", err)
 	}
-	defer resp.Body.Close()
-	body, _ = io.ReadAll(resp.Body)
+	body, err = readResponseBody(resp)
+	if err != nil {
+		return fmt.Errorf("读取登录响应失败: %v", err)
+	}
+
+	globalLogger.Printf("登录响应原始内容: %s", string(body))
+
 	// 提取JSON部分
-	re := regexp.MustCompile(`dr1003\(({.*})\)`)
+	re := regexp.MustCompile(`dr1003\s*\(\s*({.*?})\s*\)\s*`)
 	matches := re.FindSubmatch(body)
 	if len(matches) < 2 {
-		return fmt.Errorf("登录响应解析失败: %s", string(body))
+		return fmt.Errorf("登录响应解析失败，无法提取JSON: %s", string(body))
 	}
 	var result struct {
 		Result int    `json:"result"`
 		Msg    string `json:"msg"`
 	}
 	if err := json.Unmarshal(matches[1], &result); err != nil {
-		return fmt.Errorf("JSON解析失败: %v", err)
+		return fmt.Errorf("JSON解析失败: %v, 原始片段: %s", err, string(matches[1]))
 	}
 	if result.Result != 1 {
+		// 特殊处理账号停用等错误，避免频繁重试
+		if strings.Contains(result.Msg, "停机") || strings.Contains(result.Msg, "状态异常") {
+			return fmt.Errorf("登录失败: %s (账号可能被暂时封禁，请等待几分钟后再试)", result.Msg)
+		}
 		return fmt.Errorf("登录失败: %s", result.Msg)
 	}
 	globalLogger.Println("登录成功")
@@ -409,7 +489,6 @@ func login(username, password, provider string) error {
 
 // 检测互联网连接状态
 func checkInternet() bool {
-	// 使用微软NCSI检测
 	urls := []string{
 		"http://www.msftncsi.com/ncsi.txt",
 		"http://captive.apple.com/hotspot-detect.html",
@@ -423,16 +502,16 @@ func checkInternet() bool {
 		if err != nil {
 			continue
 		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		// 检查是否返回预期内容
+		body, err := readResponseBody(resp)
+		if err != nil {
+			continue
+		}
 		if u == "http://www.msftncsi.com/ncsi.txt" && strings.TrimSpace(string(body)) == "Microsoft NCSI" {
 			return true
 		}
 		if u == "http://captive.apple.com/hotspot-detect.html" && strings.Contains(string(body), "Success") {
 			return true
 		}
-		// 如果包含登录页面特征，则未登录
 		if strings.Contains(string(body), "Dr.COMWebLoginID") {
 			return false
 		}
@@ -445,17 +524,20 @@ func monitorLoop(ctx context.Context) {
 	// 先尝试登录一次
 	if err := login(config.Username, config.Password, config.Provider); err != nil {
 		globalLogger.Printf("初始登录失败: %v", err)
-		// 如果初始登录失败，可能是密码错误，直接退出
-		if strings.Contains(err.Error(), "密码错误") || strings.Contains(err.Error(), "认证失败") {
-			globalLogger.Println("认证失败，请检查账号密码")
-			return
+		// 如果是账号封禁类错误，等待较长时间再重试
+		if strings.Contains(err.Error(), "停机") || strings.Contains(err.Error(), "状态异常") {
+			globalLogger.Println("检测到账号异常，等待5分钟后重试...")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Minute):
+				// 继续循环，会再次尝试登录
+			}
 		}
-		// 其他错误继续尝试
 	} else {
 		globalLogger.Println("初始登录成功")
 	}
 
-	// 重试参数
 	backoff := 1 * time.Second
 	maxBackoff := 60 * time.Second
 	const checkInterval = 30 * time.Second
@@ -470,12 +552,10 @@ func monitorLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if checkInternet() {
-				// 在线，重置退避
 				backoff = 1 * time.Second
 				globalLogger.Println("网络连接正常")
 			} else {
 				globalLogger.Println("检测到网络掉线，尝试重新登录")
-				// 尝试登录，使用退避
 				for {
 					err := login(config.Username, config.Password, config.Provider)
 					if err == nil {
@@ -484,6 +564,17 @@ func monitorLoop(ctx context.Context) {
 						break
 					}
 					globalLogger.Printf("重新登录失败: %v，%v后重试", err, backoff)
+					// 如果是账号封禁类错误，直接跳到较长的等待
+					if strings.Contains(err.Error(), "停机") || strings.Contains(err.Error(), "状态异常") {
+						globalLogger.Println("账号异常，等待5分钟后再试")
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(5 * time.Minute):
+						}
+						backoff = 1 * time.Second // 重置退避
+						break                     // 退出内层循环，回到外层循环重新检查网络
+					}
 					select {
 					case <-ctx.Done():
 						return
@@ -500,14 +591,55 @@ func monitorLoop(ctx context.Context) {
 }
 
 // 绿色模式前台运行
-func runGreen(username, password, provider string) {
-	globalLogger = NewStdoutLogger()
+func runGreen(username, password, provider, logPath string) {
+	// 确定日志输出目标
+	if logPath == "" {
+		// 默认在当前目录下的 logs 文件夹中创建日志
+		wd, err := os.Getwd()
+		if err == nil {
+			defaultLogDir := filepath.Join(wd, "logs")
+			if err := os.MkdirAll(defaultLogDir, 0755); err == nil {
+				var lerr error
+				globalLogger, lerr = NewFileLogger(defaultLogDir)
+				if lerr == nil {
+					defer globalLogger.Close()
+				} else {
+					fmt.Printf("无法创建日志文件，回退到终端输出: %v\n", lerr)
+					globalLogger = NewStdoutLogger()
+				}
+			} else {
+				fmt.Printf("无法创建日志目录，回退到终端输出: %v\n", err)
+				globalLogger = NewStdoutLogger()
+			}
+		} else {
+			fmt.Printf("无法获取当前目录，回退到终端输出: %v\n", err)
+			globalLogger = NewStdoutLogger()
+		}
+	} else {
+		// 用户指定了日志文件，使用文件日志
+		logDirForFile := filepath.Dir(logPath)
+		var err error
+		globalLogger, err = NewFileLogger(logDirForFile)
+		if err != nil {
+			fmt.Printf("初始化日志失败: %v\n", err)
+			os.Exit(1)
+		}
+		defer globalLogger.Close()
+	}
 	globalLogger.Printf("绿色模式启动，按 Ctrl+C 停止")
+	globalLogger.Printf("日志文件保存在: %s", getLoggerPath())
 
 	config = Config{
 		Username: username,
 		Password: password,
 		Provider: provider,
+	}
+
+	// 绿色模式也尝试创建PID文件（/var/run/ 可能需要root权限，忽略错误）
+	if err := writePidFile(); err != nil {
+		globalLogger.Printf("警告: 无法创建PID文件: %v (绿色模式无需此文件)", err)
+	} else {
+		defer removePidFile()
 	}
 
 	ctx, cancel = context.WithCancel(context.Background())
@@ -535,7 +667,7 @@ func runDaemon() {
 	}
 	defer removePidFile()
 
-	// 初始化日志
+	// 初始化日志（守护模式使用 /var/log/njtechlogin/）
 	var err error
 	globalLogger, err = NewFileLogger(logDir)
 	if err != nil {
@@ -568,6 +700,17 @@ func runDaemon() {
 
 	monitorLoop(ctx)
 	globalLogger.Println("程序退出")
+}
+
+// 获取当前日志文件路径（用于提示）
+func getLoggerPath() string {
+	if globalLogger == nil {
+		return "未知"
+	}
+	if globalLogger.file != nil {
+		return globalLogger.file.Name()
+	}
+	return "终端输出"
 }
 
 // 命令: --install
@@ -729,7 +872,7 @@ func cmdUninstall(args []string) {
 
 // 命令: --start
 func cmdStart(args []string) {
-	username, password, provider, _, _ := parseCommonFlags(args)
+	username, password, provider, cfgPath, logPath := parseCommonFlags(args)
 
 	if isInstalled() {
 		// 已安装，启动服务
@@ -737,31 +880,51 @@ func cmdStart(args []string) {
 			fmt.Println("服务已在运行")
 			return
 		}
+		// 如果提供了配置参数，可以更新配置文件（可选），这里简化处理
 		startService()
 	} else {
 		// 未安装，绿色模式
+		// 尝试从配置文件读取（如果存在）
 		if username == "" || password == "" || provider == "" {
-			// 尝试从命令行参数获取，如果仍缺少，则交互式输入
-			if username == "" {
-				fmt.Print("请输入校园网账号: ")
-				fmt.Scanln(&username)
+			if _, err := os.Stat(cfgPath); err == nil {
+				data, err := os.ReadFile(cfgPath)
+				if err == nil {
+					var cfg Config
+					if err := yaml.Unmarshal(data, &cfg); err == nil {
+						if username == "" {
+							username = cfg.Username
+						}
+						if password == "" {
+							password = cfg.Password
+						}
+						if provider == "" {
+							provider = cfg.Provider
+						}
+						config.Iface = cfg.Iface
+					}
+				}
 			}
-			if password == "" {
-				fmt.Print("请输入密码: ")
-				bytePwd, _ := term.ReadPassword(int(syscall.Stdin))
-				password = string(bytePwd)
-				fmt.Println()
-			}
-			if provider == "" {
-				fmt.Print("请输入运营商 (telecom/cmcc): ")
-				fmt.Scanln(&provider)
-			}
+		}
+		// 如果仍缺少，交互式输入
+		if username == "" {
+			fmt.Print("请输入校园网账号: ")
+			fmt.Scanln(&username)
+		}
+		if password == "" {
+			fmt.Print("请输入密码: ")
+			bytePwd, _ := term.ReadPassword(int(syscall.Stdin))
+			password = string(bytePwd)
+			fmt.Println()
+		}
+		if provider == "" {
+			fmt.Print("请输入运营商 (telecom/cmcc): ")
+			fmt.Scanln(&provider)
 		}
 		if provider != "telecom" && provider != "cmcc" {
 			fmt.Println("运营商必须为 telecom 或 cmcc")
 			os.Exit(1)
 		}
-		runGreen(username, password, provider)
+		runGreen(username, password, provider, logPath)
 	}
 }
 
@@ -799,7 +962,6 @@ func cmdStop(args []string) {
 		}
 	} else {
 		// 未安装，尝试停止绿色模式进程
-		// 查找同名进程（排除自身）
 		pid := os.Getpid()
 		cmd := exec.Command("pgrep", "-f", programName)
 		out, err := cmd.Output()
@@ -827,7 +989,6 @@ func cmdStop(args []string) {
 
 // 命令: --show
 func cmdShow(args []string) {
-	// 解析可能的 --config 参数
 	fs := flag.NewFlagSet("show", flag.ContinueOnError)
 	var cfgPath string
 	fs.StringVar(&cfgPath, "config", configFile, "配置文件路径")
@@ -835,7 +996,7 @@ func cmdShow(args []string) {
 	fs.Parse(args)
 
 	installed := isInstalled()
-	running := isRunning() // 仅对守护进程有效
+	running := isRunning()
 
 	// 检测绿色进程
 	greenRunning := false
@@ -871,7 +1032,6 @@ func cmdShow(args []string) {
 		}
 	}
 
-	// 状态判断
 	if installed {
 		if running {
 			fmt.Println("状态: 已安装服务，正在运行")
@@ -891,7 +1051,6 @@ func cmdShow(args []string) {
 		}
 		fmt.Println("配置信息:")
 		fmt.Printf("  账号: %s\n", cfg.Username)
-		// 密码隐藏显示
 		if cfg.Password != "" {
 			fmt.Printf("  密码: %s\n", maskPassword(cfg.Password))
 		}
@@ -912,7 +1071,6 @@ func cmdShow(args []string) {
 	}
 }
 
-// 掩码密码，显示前2位和后2位，中间用星号
 func maskPassword(pwd string) string {
 	if len(pwd) <= 4 {
 		return "****"

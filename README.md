@@ -1,5 +1,5 @@
 # NjtechAutoLogin - 泥工校园网自动登录工具
-
+> 此项目大量代码使用AI生成。
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hex-0xd4c0/NjtechAutoLogin)](https://golang.org/)
 
 `NjtechAutoLogin` 是一个专为 OpenWrt 路由器设计的校园网自动登录与保活工具，支持南京工业大学的 Dr.COM 认证系统。它可以作为系统服务后台运行，也可以在前台以绿色模式运行，自动检测网络状态并在掉线时重连。

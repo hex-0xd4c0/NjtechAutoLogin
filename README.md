@@ -129,7 +129,7 @@ njtech-autologin --start
 
 #### 绿色模式运行（带参数）
 ```bash
-njtech-autologin --start --usr 202521110072 --pwd Liyue0528 --provider cmcc
+njtech-autologin --start --usr ************ --pwd ******** --provider cmcc
 ```
 
 #### 查看状态

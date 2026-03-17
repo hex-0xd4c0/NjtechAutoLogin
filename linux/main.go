@@ -36,7 +36,7 @@ const (
 	initScriptPath = "/etc/init.d/" + programName
 	logDir         = "/var/log/" + programName
 	pidFile        = "/var/run/" + programName + ".pid"
-	version        = "1.1.0" // 版本升级
+	version        = "1.1.0"
 )
 
 // 配置结构
@@ -200,6 +200,8 @@ func main() {
 		cmdStop(args)
 	case "--show":
 		cmdShow(args)
+	case "--daemon": // 守护模式专用参数，由 init 脚本调用
+		runDaemon()
 	default:
 		fmt.Printf("未知命令: %s\n", cmd)
 		printHelp()
@@ -880,7 +882,6 @@ func cmdStart(args []string) {
 			fmt.Println("服务已在运行")
 			return
 		}
-		// 如果提供了配置参数，可以更新配置文件（可选），这里简化处理
 		startService()
 	} else {
 		// 未安装，绿色模式

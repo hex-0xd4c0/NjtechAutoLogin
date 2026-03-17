@@ -1,4 +1,7 @@
 # NjtechAutoLogin - 泥工校园网自动登录工具
+> 此项目大量代码使用AI生成。
+
+**目前无法使用`--install`运行，我也不知道为啥，反正先用`--start`罢，又不是不能用**
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/hex-0xd4c0/NjtechAutoLogin)](https://golang.org/)
 

@@ -4,8 +4,18 @@ config.yml
 
 info.md
 
-.DS_Store/
+.DS_Store
 
 repo/
 
 repo/darwin/njtech-autologin
+
+openwrt
+
+# 编译产物（release时手动附加）
+njtechlogin-darwin-arm64
+src/njtechlogin-linux-amd64
+src/njtechlogin-linux-arm64
+
+# 抓包文件
+trace.txt

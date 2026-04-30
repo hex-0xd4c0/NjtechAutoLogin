@@ -1,6 +1,6 @@
-module njtech-autologin-darwin
+module njtech-autologin
 
-go 1.26.1
+go 1.24.0
 
 require (
 	golang.org/x/term v0.40.0
